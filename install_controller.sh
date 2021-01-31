@@ -1,5 +1,13 @@
 #!/bin/sh
 
+# Prerequisites
+# - Ubuntu 20.04.* with VMX|SVM (CPU)
+# - Working networking (192.168.0.100/24, GW 192.168.0.254, DNS 192.168.0.2)
+# - Hostname set to controller.mclermont.ca
+# - Hosts same as config provided (/etc/hosts)
+# - One free disk for Cinder, unformatted, wiped. (/dev/sdb)
+# - Four free disks for Swift, unformatted, wiped. (/dev/sd[c-f])
+
 echo "Installing chrony..."
 
 apt-get install chrony -y
@@ -158,8 +166,94 @@ su -s /bin/sh -c "glance-manage db_sync" glance
 systemctl enable glance-api
 systemctl restart glance-api
 
+echo "Installing swift..."
+
+openstack user create --domain default --password e7879e43e99725492165 swift
+openstack role add --project service --user swift admin
+openstack service create --name swift --description "OpenStack Object Storage" object-store
+openstack endpoint create --region RegionOne object-store public http://controller:8080/v1/AUTH_%\(project_id\)s
+openstack endpoint create --region RegionOne object-store internal http://controller:8080/v1/AUTH_%\(project_id\)s
+openstack endpoint create --region RegionOne object-store admin http://controller:8080/v1
+apt-get install swift swift-proxy xfsprogs rsync python3-swiftclient python3-keystoneclient python3-keystonemiddleware -y
+cp config_controller/etc/swift/proxy-server.conf /etc/swift/proxy-server.conf
+mkfs.xfs /dev/sdc -f
+mkfs.xfs /dev/sdd -f
+mkfs.xfs /dev/sde -f
+mkfs.xfs /dev/sdf -f
+mkdir -p /srv/node/sdc
+mkdir -p /srv/node/sdd
+mkdir -p /srv/node/sde
+mkdir -p /srv/node/sdf
+echo "$(blkid | grep "/dev/sdc" | awk '{print $2}') /srv/node/sdc xfs noatime 0 2" >> /etc/fstab
+echo "$(blkid | grep "/dev/sdd" | awk '{print $2}') /srv/node/sdd xfs noatime 0 2" >> /etc/fstab
+echo "$(blkid | grep "/dev/sde" | awk '{print $2}') /srv/node/sde xfs noatime 0 2" >> /etc/fstab
+echo "$(blkid | grep "/dev/sdf" | awk '{print $2}') /srv/node/sdf xfs noatime 0 2" >> /etc/fstab
+mount -a
+cp config_controller/etc/rsyncd.conf /etc/rsyncd.conf
+cp config_controller/etc/default/rsync /etc/default/rsync
+apt-get install swift-account swift-container swift-object -y
+cp config_controller/etc/swift/account-server.conf /etc/swift/account-server.conf
+cp config_controller/etc/swift/container-server.conf /etc/swift/container-server.conf
+cp config_controller/etc/swift/object-server.conf /etc/swift/object-server.conf
+chown -R swift:swift /srv/node
+mkdir -p /var/cache/swift
+chown -R root:swift /var/cache/swift
+chmod -R 775 /var/cache/swift
+swift-ring-builder account.builder create 10 3 1
+swift-ring-builder account.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6202 --device sdc --weight 100
+swift-ring-builder account.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6202 --device sdd --weight 100
+swift-ring-builder account.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6202 --device sde --weight 100
+swift-ring-builder account.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6202 --device sdf --weight 100
+swift-ring-builder account.builder rebalance
+swift-ring-builder container.builder create 10 3 1
+swift-ring-builder container.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6201 --device sdc --weight 100
+swift-ring-builder container.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6201 --device sdd --weight 100
+swift-ring-builder container.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6201 --device sde --weight 100
+swift-ring-builder container.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6201 --device sdf --weight 100
+swift-ring-builder container.builder rebalance
+swift-ring-builder object.builder create 10 3 1
+swift-ring-builder object.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6200 --device sdc --weight 100
+swift-ring-builder object.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6200 --device sdd --weight 100
+swift-ring-builder object.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6200 --device sde --weight 100
+swift-ring-builder object.builder add --region 1 --zone 1 --ip 192.168.0.100 --port 6200 --device sdf --weight 100
+swift-ring-builder object.builder rebalance
+mv *.builder /etc/swift/
+mv *.gz /etc/swift/
+cp config_controller/etc/swift/swift.conf /etc/swift/swift.conf
+chown -R root:swift /etc/swift
+systemctl restart memcached
+systemctl enable swift-proxy
+swift-init all start
+
 echo "Installing cinder..."
 
 mysql -e "CREATE DATABASE cinder"
 mysql -e "GRANT ALL PRIVILEGES ON glance.* TO 'cinder'@'localhost' IDENTIFIED BY '19bec285257296906109'"
 mysql -e "GRANT ALL PRIVILEGES ON glance.* TO 'cinder'@'%' IDENTIFIED BY '19bec285257296906109'"
+openstack user create --domain default --password c4e3a467213dd23bbf2a cinder
+openstack role add --project service --user cinder admin
+openstack service create --name cinderv2 --description "OpenStack Block Storage" volumev2
+openstack service create --name cinderv3 --description "OpenStack Block Storage" volumev3
+openstack endpoint create --region RegionOne volumev2 public http://controller:8776/v2/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev2 internal http://controller:8776/v2/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev2 admin http://controller:8776/v2/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev3 public http://controller:8776/v3/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev3 internal http://controller:8776/v3/%\(project_id\)s
+openstack endpoint create --region RegionOne volumev3 admin http://controller:8776/v3/%\(project_id\)s
+apt-get install cinder-api cinder-scheduler cinder-volume cinder-backup install lvm2 thin-provisioning-tools -y
+cp config_controller/etc/cinder/cinder.conf /etc/cinder/cinder.conf
+su -s /bin/sh -c "cinder-manage db sync" cinder
+wipefs /dev/sdb -a
+pvcreate /dev/sdb
+vgcreate cinder-volumes /dev/sdb
+cp config_controller/etc/lvm/lvm.conf /etc/lvm/lvm.conf
+systemctl restart nova-api
+systemctl enable tgt
+systemctl enable cinder-scheduler
+systemctl enable cinder-volume
+systemctl enable cinder-backup
+systemctl restart tgt
+systemctl restart cinder-scheduler
+systemctl restart cinder-volume
+systemctl restart apache2
+systemctl restart cinder-backup
