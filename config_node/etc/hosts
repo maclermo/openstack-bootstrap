@@ -1,0 +1,4 @@
+192.168.0.91 kvm1.mclermont.ca kvm1
+192.168.0.92 kvm2.mclermont.ca kvm2
+
+192.168.0.100 controller
